@@ -10,8 +10,8 @@
     },
 
     "ServerScriptService": {
-      "Server": {
-        "$path": "src/server"
+      "serverEnemies": {
+        "$path": "src/serverEnemies"
       }
     },
 
