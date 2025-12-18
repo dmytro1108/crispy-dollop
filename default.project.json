@@ -6,19 +6,22 @@
     "ReplicatedStorage": {
       "Shared": {
         "$path": "src/shared"
+      }, 
+      "DoorUsed": {
+        "$path": "src/DoorUsed.model.json"
       }
     },
 
     "ServerScriptService": {
-      "serverEnemies": {
-        "$path": "src/serverEnemies"
+      "server_stuff": {
+        "$path": "src/server_stuff"
       }
     },
 
     "StarterPlayer": {
       "StarterPlayerScripts": {
-        "Client": {
-          "$path": "src/client"
+        "client_stuff": {
+          "$path": "src/client_stuff"
         }
       }
     },
@@ -43,9 +46,9 @@
             0
           ],
           "Size": [
-            512,
+            59.6,
             20,
-            512
+            58.4
           ]
         }
       }
