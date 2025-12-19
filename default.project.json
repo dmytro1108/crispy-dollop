@@ -9,6 +9,9 @@
       }, 
       "DoorUsed": {
         "$path": "src/DoorUsed.model.json"
+      },
+      "DropTool": {
+        "$path": "src/DropTool.model.json"
       }
     },
 

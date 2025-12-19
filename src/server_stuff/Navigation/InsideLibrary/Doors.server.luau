@@ -1,12 +1,16 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local DoorUsed = ReplicatedStorage:WaitForChild("DoorUsed") -- BindableEvent
+local DoorUsed = ReplicatedStorage:WaitForChild("DoorUsed") -- BindableEvent, tells us that user interacted
 
 
 -- Hardcoded spawn positions
 local SPAWN_POSITIONS = {
-	Library_Main = Vector3.new(11.4, 0.5, -10),
-	Library_basement = Vector3.new(11.4, -79.274, -5.6),
+	Library_Main = Vector3.new(-18, 41.5, 18),
+	Library_basement = Vector3.new(-16, 0.5, -1),
+	Library_rooftop_access = Vector3.new(-23, 41.5, 3),
+	Library_rooftop_exit = Vector3.new(-19, 73.5, -1),
+	Library_access = Vector3.new(-121.141, 0.499, -94.521),
+	Library_exit = Vector3.new(-121.876, 0.499, -91.956),
 }
 
 ----------------------------------------------------
