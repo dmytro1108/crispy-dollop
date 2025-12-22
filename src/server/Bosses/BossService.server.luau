@@ -1,38 +1,23 @@
--- ServerScriptService/BossService.server.lua
 local Players = game:GetService("Players")
-local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local PathfindingService = game:GetService("PathfindingService")
-local RunService = game:GetService("RunService")
 
--- Remotes
-local RemotesFolder = ReplicatedStorage:WaitForChild("remote")
-local NoisyToolClick = RemotesFolder:WaitForChild("NoisyToolClick")
-local BossUI = RemotesFolder:WaitForChild("BossUI")
+local Remotes = ReplicatedStorage:WaitForChild("remote")
+local BossUI = Remotes:WaitForChild("BossUI")
+local NoisyToolClick = Remotes:WaitForChild("NoisyToolClick")
 
--- =========================
--- CONFIG
--- =========================
-local REQUIRED_CLICKS = 12
+-- Grab the existing rig you placed in Workspace
+local boss = workspace:WaitForChild("Librarian")
+boss.Name = "LibraryBoss"
 
-local STATES = {
-	Idle = "Idle",
-	Chase = "Chase",
-	Lost = "Lost",
-}
+local humanoid = boss:FindFirstChildOfClass("Humanoid")
+local root = boss:FindFirstChild("HumanoidRootPart")
 
--- Boss movement constraints
-local FIXED_Y = 43.696
-local WANDER_COOLDOWN = 2.5
-local WANDER_RADIUS_JITTER = 2
+-- Ensure server owns movement (helps stability)
+pcall(function()
+	root:SetNetworkOwner(nil)
+end)
 
-local PATH_RECOMPUTE_COOLDOWN = 0.5
-local WAYPOINT_REACH_DIST = 2.5
-
--- Optional: forbid boss from being blocked by tiny clutter (your "temporary working basic")
-local BOSS_NONCOLLIDE = true
-
--- Library polygon (XZ only) - you gave 4 corners
+-- Library polygon (XZ)
 local POLY = {
 	Vector2.new(-39.05,  -74.314),
 	Vector2.new(-18.076, -152.59),
@@ -40,46 +25,125 @@ local POLY = {
 	Vector2.new(-199.851,-115.576),
 }
 
--- Interior "hole" simplification: treat as a forbidden circle around the interior point
-local INTERIOR_CENTER = Vector2.new(-105.301, -143.247)
-local INTERIOR_RADIUS = 10 -- tweak as you like
+local STATE_IDLE = "IDLE"
+local STATE_CHASE = "CHASE"
+local STATE_LOST = "LOST"
 
--- Aggro range for “can see” checks (optional)
-local AGGRO_RANGE = 250
+local state = STATE_IDLE
+local currentTarget : Player? = nil
+local wanderDestination : Vector3? = nil
 
--- =========================
--- UTIL: point in polygon (ray casting)
--- =========================
-local function pointInPolygonXZ(point2, poly)
+local LOST_DURATION = 4 -- seconds
+local lostStartTime = 0
+
+local INTERACT_DISTANCE = 4 -- studs (very close)
+local interactionCooldown = {} -- [Player] = lastTime
+local INTERACT_COOLDOWN = 1.5 -- seconds
+
+-- Click tracking
+local REQUIRED_CLICKS = 12
+local clickCount = {} :: {[Player]: number}
+
+local Workspace = game:GetService("Workspace")
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+rayParams.IgnoreWater = true
+
+local Players = game:GetService("Players")
+
+local root = boss:WaitForChild("HumanoidRootPart")
+
+local touchDebounce = {}
+
+root.Touched:Connect(function(hit)
+	local character = hit.Parent
+	if not character then return end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+
+	local player = Players:GetPlayerFromCharacter(character)
+	if not player then return end
+
+	-- Only interact while chasing
+	if state ~= STATE_CHASE then return end
+
+	-- Debounce
+	if touchDebounce[player] then return end
+	touchDebounce[player] = true
+
+	-- === EJECT PLAYER UPWARD ===
+
+	local hrp = character:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		-- Base upward velocity (normal jump ≈ 50)
+		local baseUpwardVelocity = 50
+
+		-- Exponential-style boost (×10)
+		local launchVelocity = baseUpwardVelocity * 10
+
+		-- Apply vertical velocity ONLY
+		hrp.AssemblyLinearVelocity = Vector3.new(
+			hrp.AssemblyLinearVelocity.X,
+			launchVelocity,
+			hrp.AssemblyLinearVelocity.Z
+		)
+
+		print("[BOSS INTERACTION] Player launched upward:", player.Name)
+	end
+
+	-- Reset debounce after short delay
+	task.delay(1.5, function()
+		touchDebounce[player] = nil
+	end)
+end)
+
+
+local function hasLineOfSight(fromPos: Vector3, targetHRP: BasePart)
+	if not targetHRP then
+		return false
+	end
+
+	-- Raise ray to "eye level"
+	local from = fromPos + Vector3.new(0, 4, 0)
+	local to = targetHRP.Position + Vector3.new(0, 4, 0)
+
+	-- Ignore boss + target character
+	rayParams.FilterDescendantsInstances = {
+		boss,
+		targetHRP.Parent
+	}
+
+	local direction = to - from
+	local result = Workspace:Raycast(from, direction, rayParams)
+
+	-- If nothing blocks the ray, we can see the target
+	if not result then
+		return true
+	end
+
+	-- If we directly hit the target character, LOS is valid
+	return result.Instance:IsDescendantOf(targetHRP.Parent)
+end
+
+
+local function pointInPolygonXZ(p, poly)
 	local inside = false
 	local j = #poly
 	for i = 1, #poly do
 		local xi, zi = poly[i].X, poly[i].Y
 		local xj, zj = poly[j].X, poly[j].Y
 		local intersect =
-			((zi > point2.Y) ~= (zj > point2.Y)) and
-			(point2.X < (xj - xi) * (point2.Y - zi) / ((zj - zi) ~= 0 and (zj - zi) or 1e-9) + xi)
-		if intersect then
-			inside = not inside
-		end
+			((zi > p.Y) ~= (zj > p.Y)) and
+			(p.X < (xj - xi) * (p.Y - zi) / ((zj - zi) ~= 0 and (zj - zi) or 1e-9) + xi)
+		if intersect then inside = not inside end
 		j = i
 	end
 	return inside
 end
 
-local function inLibraryXZ(pos3)
-	local p = Vector2.new(pos3.X, pos3.Z)
-	if not pointInPolygonXZ(p, POLY) then
-		return false
-	end
-	-- reject interior circle
-	if (p - INTERIOR_CENTER).Magnitude <= INTERIOR_RADIUS then
-		return false
-	end
-	return true
-end
-
-local function getPolyBounds(poly)
+local function bounds(poly)
 	local minX, maxX = math.huge, -math.huge
 	local minZ, maxZ = math.huge, -math.huge
 	for _, v in ipairs(poly) do
@@ -91,327 +155,159 @@ local function getPolyBounds(poly)
 	return minX, maxX, minZ, maxZ
 end
 
-local minX, maxX, minZ, maxZ = getPolyBounds(POLY)
+local minX, maxX, minZ, maxZ = bounds(POLY)
 
-local function randomWanderPoint()
-	-- rejection sampling in bounding box
-	for _ = 1, 60 do
-		local x = math.random() * (maxX - minX) + minX
-		local z = math.random() * (maxZ - minZ) + minZ
-		local p3 = Vector3.new(x, FIXED_Y, z)
-		if inLibraryXZ(p3) then
-			return p3
+local function randomPointInLibrary()
+	for _ = 1, 80 do
+		local x = minX + math.random() * (maxX - minX)
+		local z = minZ + math.random() * (maxZ - minZ)
+		local p2 = Vector2.new(x, z)
+		if pointInPolygonXZ(p2, POLY) then
+			-- keep Y as whatever your floor is; we are NOT clamping yet
+			return Vector3.new(x, root.Position.Y, z)
 		end
 	end
-	-- fallback: center-ish
-	return Vector3.new((minX + maxX)/2, FIXED_Y, (minZ + maxZ)/2)
+	return root.Position
 end
 
--- =========================
--- Boss spawn / references
--- =========================
-local bossTemplate = ServerStorage:WaitForChild("Bosses"):WaitForChild("LibraryBoss")
-local boss = bossTemplate:Clone()
-boss.Name = "LibraryBoss"
-boss.Parent = workspace
-
-local humanoid = boss:FindFirstChildOfClass("Humanoid")
-local root = boss:WaitForChild("HumanoidRootPart")
-humanoid.RootPart = root
-
-humanoid.AutoRotate = false
-
--- (optional) make boss not collide with world as your “basic” unblock
-if BOSS_NONCOLLIDE then
-	for _, d in ipairs(boss:GetDescendants()) do
-		if d:IsA("BasePart") then
-			d.CanCollide = false
-		end
+-- Force UI OFF for everyone (and for late joiners)
+local function setAllOff()
+	for _, plr in ipairs(Players:GetPlayers()) do
+		BossUI:FireClient(plr, "OFF")
 	end
 end
 
--- lock yaw (no turning)
-local lockedYaw = root.Orientation.Y
-
--- clamp Y + lock rotation continuously
-RunService.Heartbeat:Connect(function()
-	if not root.Parent then return end
-	local pos = root.Position
-	root.CFrame = CFrame.new(Vector3.new(pos.X, FIXED_Y, pos.Z)) * CFrame.Angles(0, math.rad(lockedYaw), 0)
+Players.PlayerAdded:Connect(function(plr)
+	task.wait(0.2)
+	BossUI:FireClient(plr, "OFF")
 end)
 
--- =========================
--- Target tracking
--- =========================
-local clickCounts = {} :: {[Player]: number}
-local currentTarget : Player? = nil
-local lastSeenPos : Vector3? = nil
+setAllOff()
 
--- =========================
--- LOS check (simple raycast)
--- =========================
-local rayParams = RaycastParams.new()
-rayParams.FilterType = Enum.RaycastFilterType.Exclude
-rayParams.IgnoreWater = true
+-- IDLE wander loop
+local WANDER_COOLDOWN = 0.5
 
-local function hasLineOfSightTo(player: Player)
-	local char = player.Character
-	if not char then return false end
-	local targetRoot = char:FindFirstChild("HumanoidRootPart")
-	local targetHum = char:FindFirstChildOfClass("Humanoid")
-	if not targetRoot or not targetHum or targetHum.Health <= 0 then return false end
-
-	local origin = root.Position
-	local dir = targetRoot.Position - origin
-	if dir.Magnitude > AGGRO_RANGE then return false end
-
-	-- exclude boss + target character from ray
-	rayParams.FilterDescendantsInstances = { boss, char }
-
-	local result = workspace:Raycast(origin, dir, rayParams)
-	-- If ray hits something before reaching the player, LOS is blocked
-	return result == nil
-end
-
-local function isTargetValid(player: Player)
-	local char = player.Character
-	if not char then return false end
-	local hrp = char:FindFirstChild("HumanoidRootPart")
-	local hum = char:FindFirstChildOfClass("Humanoid")
-	if not hrp or not hum or hum.Health <= 0 then return false end
-	if not inLibraryXZ(hrp.Position) then
-		return false
-	end
-	return true
-end
-
--- =========================
--- Path movement
--- =========================
-local agentParams = {
-	AgentRadius = 2,
-	AgentHeight = 6,
-	AgentCanJump = true,
-	AgentJumpHeight = 6, -- clears “table-ish” obstacles
-	AgentMaxSlope = 30,
-}
-
-local activeWaypoints = nil
-local waypointIndex = 1
-
-local function computePathTo(dest: Vector3)
-	local path = PathfindingService:CreatePath(agentParams)
-	path:ComputeAsync(root.Position, dest)
-	if path.Status ~= Enum.PathStatus.Success then
-		return nil
-	end
-	return path:GetWaypoints()
-end
-
-local function moveAlongWaypoints(waypoints)
-	if not waypoints or #waypoints == 0 then return true end
-
-	local wp = waypoints[waypointIndex]
-	if not wp then
-		return true
-	end
-
-	if wp.Action == Enum.PathWaypointAction.Jump then
-		humanoid.Jump = true
-	end
-
-	humanoid:MoveTo(Vector3.new(wp.Position.X, FIXED_Y, wp.Position.Z))
-
-	local dist = (root.Position - Vector3.new(wp.Position.X, FIXED_Y, wp.Position.Z)).Magnitude
-	if dist <= WAYPOINT_REACH_DIST then
-		waypointIndex += 1
-	end
-
-	return waypointIndex > #waypoints
-end
-
--- =========================
--- State machine
--- =========================
-local state = STATES.Idle
-local wanderTimer = 0
-local lastPathCompute = 0
-
-local function setState(newState, targetPlayer)
-	if state == newState then return end
-	state = newState
-
-	if newState == STATES.Idle then
-		currentTarget = nil
-		lastSeenPos = nil
-		activeWaypoints = nil
-		waypointIndex = 1
-		humanoid:MoveTo(root.Position)
-		-- turn off UI for everyone (safe + simple)
-		for _, plr in ipairs(Players:GetPlayers()) do
-			BossUI:FireClient(plr, "OFF")
-		end
-
-	elseif newState == STATES.Chase then
-		currentTarget = targetPlayer
-		activeWaypoints = nil
-		waypointIndex = 1
-		lastPathCompute = 0
-
-		-- UI: chased player sees CHASE
-		for _, plr in ipairs(Players:GetPlayers()) do
-			BossUI:FireClient(plr, "OFF")
-		end
-		if currentTarget then
-			BossUI:FireClient(currentTarget, "CHASE")
-		end
-
-	elseif newState == STATES.Lost then
-		activeWaypoints = nil
-		waypointIndex = 1
-		lastPathCompute = 0
-
-		-- UI: previously chased player sees LOST blink
-		if currentTarget then
-			BossUI:FireClient(currentTarget, "LOST")
-		end
-	end
-end
-
--- =========================
--- Click counting (SERVER)
--- =========================
-local function resetClicks(player)
-	clickCounts[player] = 0
-end
-
-Players.PlayerRemoving:Connect(function(p)
-	clickCounts[p] = nil
-	if currentTarget == p then
-		setState(STATES.Idle)
-	end
-end)
-NoisyToolClick.OnServerEvent:Connect(function(player, tool)
-	-- Validate tool + equipped
-	if not tool or not tool:IsA("Tool") then return end
-
-	local char = player.Character
-	if not char then return end
-	if tool.Parent ~= char then
-		-- not equipped => ignore
-		return
-	end
-
-	-- Validate this is the noisy tool (name or attribute)
-	-- You can tighten this by checking an attribute ID.
-	if tool.Name ~= "noisy_horn" then return end
-
-	-- If player is outside library, don't count (matches “if leave library they will not be chased”)
-	local hrp = char:FindFirstChild("HumanoidRootPart")
-	if not hrp or not inLibraryXZ(hrp.Position) then
-		return
-	end
-
-	clickCounts[player] = (clickCounts[player] or 0) + 1
-
-	if clickCounts[player] >= REQUIRED_CLICKS then
-		-- “noisiest”: last player to reach 12 becomes target
-		resetClicks(player)
-
-		-- Engage chase immediately
-		setState(STATES.Chase, player)
-	end
-end)
-
--- =========================
--- Main loop
--- =========================
+-- idle or chase or lost 
 task.spawn(function()
-	local last = os.clock()
 	while boss.Parent do
-		local now = os.clock()
-		local dt = now - last
-		last = now
+		if state == STATE_IDLE then
+			-- IDLE: wander
+			local dest = randomPointInLibrary()
+			humanoid.WalkSpeed = 10
+			humanoid:MoveTo(dest)
 
-		if state == STATES.Idle then
-			-- wander
-			wanderTimer -= dt
-			if wanderTimer <= 0 then
-				wanderTimer = WANDER_COOLDOWN + math.random(-WANDER_RADIUS_JITTER, WANDER_RADIUS_JITTER)
-				local dest = randomWanderPoint()
-				humanoid:MoveTo(dest)
-			end
-
-		elseif state == STATES.Chase then
-			if not currentTarget or not isTargetValid(currentTarget) then
-				-- either dead, gone, or left library
-				if currentTarget and currentTarget.Character and currentTarget.Character:FindFirstChild("HumanoidRootPart") then
-					lastSeenPos = currentTarget.Character.HumanoidRootPart.Position
-				else
-					lastSeenPos = root.Position
-				end
-				setState(STATES.Lost)
+		elseif state == STATE_CHASE and currentTarget then
+			-- CHASE: move toward target
+			local char = currentTarget.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+		
+			if not hrp or not hum or hum.Health <= 0 then
+				-- target invalid → back to idle
+				-- default walking speed
+				humanoid.WalkSpeed = 10
+				state = STATE_IDLE
+				currentTarget = nil
+				setAllOff()
 			else
-				local targetHrp = currentTarget.Character.HumanoidRootPart
-				-- LOS gate: if blocked => Lost (but remember last seen)
-				if not hasLineOfSightTo(currentTarget) then
-					lastSeenPos = targetHrp.Position
-					setState(STATES.Lost)
+				-- if target leaves library → immediate disengage
+				if not pointInPolygonXZ(
+					Vector2.new(hrp.Position.X, hrp.Position.Z),
+					POLY
+				) then
+					-- reset walking speed
+					humanoid.WalkSpeed = 10
+					-- lost them
+					state = STATE_IDLE
+					currentTarget = nil
+					setAllOff()
 				else
-					lastSeenPos = targetHrp.Position
-
-					-- recompute path on cooldown
-					if (now - lastPathCompute) >= PATH_RECOMPUTE_COOLDOWN or not activeWaypoints then
-						lastPathCompute = now
-						activeWaypoints = computePathTo(lastSeenPos)
-						waypointIndex = 1
-					end
-
-					-- follow path (fallback: MoveTo direct)
-					if activeWaypoints then
-						local done = moveAlongWaypoints(activeWaypoints)
-						if done then
-							activeWaypoints = nil
-						end
+					-- adjust the speed of the boss while chasing
+					if hrp and hasLineOfSight(root.Position, hrp) then
+						humanoid.WalkSpeed = 24
+						humanoid:MoveTo(hrp.Position)
+						
 					else
-						humanoid:MoveTo(Vector3.new(lastSeenPos.X, FIXED_Y, lastSeenPos.Z))
+						-- lost sight, go to LOST state
+						state = STATE_LOST
+						wanderDestination = hrp.Position
+						lostStartTime = os.clock()						
+						humanoid.WalkSpeed = 10
+						BossUI:FireClient(currentTarget, "LOST")
 					end
 				end
 			end
+		elseif state == STATE_LOST then -- go to the last place the player was seen
+			local elapsed = os.clock() - lostStartTime
+			-- NO destination, go back to idle.
+			if not wanderDestination then
+				state = STATE_IDLE
+				humanoid.WalkSpeed = 10
+				setAllOff()
 
-		elseif state == STATES.Lost then
-			-- re-acquire if target becomes visible again AND still in library
-			if currentTarget and isTargetValid(currentTarget) and hasLineOfSightTo(currentTarget) then
-				setState(STATES.Chase, currentTarget)
 			else
-				-- go to lastSeenPos, then Idle
-				if not lastSeenPos then
-					setState(STATES.Idle)
-				else
-					if (now - lastPathCompute) >= PATH_RECOMPUTE_COOLDOWN or not activeWaypoints then
-						lastPathCompute = now
-						activeWaypoints = computePathTo(lastSeenPos)
-						waypointIndex = 1
-					end
+				-- re-acquire the player
+				local hrp = nil
+				if currentTarget and currentTarget.Character then
+					hrp = currentTarget.Character:FindFirstChild("HumanoidRootPart")
+				end
 
-					local reached = false
-					if activeWaypoints then
-						reached = moveAlongWaypoints(activeWaypoints)
-						if reached then
-							activeWaypoints = nil
+				-- switch back to CHASE.
+				if hrp and hasLineOfSight(root.Position, hrp) then
+					state = STATE_CHASE
+					humanoid.WalkSpeed = 24
+					BossUI:FireClient(currentTarget, "ON")
+					humanoid:MoveTo(hrp.Position)
+
+				else
+					if elapsed < LOST_DURATION then
+						-- remain LOST and walk toward wanderDestination
+						humanoid.WalkSpeed = 10
+
+						-- Optional: only tell the client LOST while we are lost
+						-- (This can be spammy if called every loop, but it's simple and safe.)
+						if currentTarget then
+							BossUI:FireClient(currentTarget, "LOST")
+						end
+
+						humanoid:MoveTo(wanderDestination)
+
+						-- reached last spot and did not find the player, IDLE
+						local dist = (root.Position - wanderDestination).Magnitude
+						if dist < 5 then
+							wanderDestination = nil
+							currentTarget = nil
+							state = STATE_IDLE
+							humanoid.WalkSpeed = 10
+							setAllOff()
 						end
 					else
-						humanoid:MoveTo(Vector3.new(lastSeenPos.X, FIXED_Y, lastSeenPos.Z))
-						reached = (root.Position - Vector3.new(lastSeenPos.X, FIXED_Y, lastSeenPos.Z)).Magnitude <= 4
-					end
-
-					if reached then
-						setState(STATES.Idle)
+						-- give up, back to IDLE
+						wanderDestination = nil
+						currentTarget = nil
+						state = STATE_IDLE
+						humanoid.WalkSpeed = 10
+						setAllOff()
 					end
 				end
 			end
 		end
-
-		task.wait(0.1)
+		task.wait(WANDER_COOLDOWN)
 	end
 end)
+
+-- count noisy tool clicks
+NoisyToolClick.OnServerEvent:Connect(function(player)
+	clickCount[player] = (clickCount[player] or 0) + 1
+	print("Player", player.Name, "click count:", clickCount[player])
+	if clickCount[player] >= REQUIRED_CLICKS then
+		clickCount[player] = 0
+		currentTarget = player
+		state = STATE_CHASE
+
+		-- UI: AWARE stays active during chase
+		print("Player", player.Name, "has alerted the boss!")
+		BossUI:FireClient(player, "ON")
+	end
+end)
+

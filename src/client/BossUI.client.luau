@@ -1,52 +1,55 @@
 -- StarterPlayerScripts/BossUI.client.lua
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
 
-local bossUIRemote = ReplicatedStorage:WaitForChild("remote"):WaitForChild("BossUI")
+local player = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local fading = false
+-- Your GUI references (these must exist in PlayerGui at runtime)
+local gui = player:WaitForChild("PlayerGui"):WaitForChild("Eye")
+local picChase = gui:WaitForChild("Chase")
+local picLost  = gui:WaitForChild("Lost")
 
--- TODO: replace these with your actual GUI references
-local gui = game.Players.LocalPlayer:WaitForChild("PlayerGui"):WaitForChild("BossGui")
-local picChase = gui:WaitForChild("Caught") -- first picture
-local picLost  = gui:WaitForChild("Searching")  -- second picture
+-- HARD DEFAULT OFF (client owns this)
+picChase.Visible = false
+picLost.Visible = false
 
-local blinkTween
+print("Eye GUI found?", gui ~= nil)
 
-local function stopBlink()
-	if blinkTween then
-		blinkTween:Cancel()
-		blinkTween = nil
-	end
-end
+local BossUI = ReplicatedStorage:WaitForChild("remote"):WaitForChild("BossUI")
 
-local function startBlink()
-	stopBlink()
-	picLost.Visible = true
-	picLost.ImageTransparency = 0.2
-
-	-- simple blink loop by toggling transparency
-	task.spawn(function()
-		while picLost.Visible do
-			picLost.ImageTransparency = 0.2
-			task.wait(0.25)
-			picLost.ImageTransparency = 0.9
-			task.wait(0.25)
-		end
-	end)
-end
-
-bossUIRemote.OnClientEvent:Connect(function(mode)
-	-- mode = "CHASE" | "LOST" | "OFF"
-	if mode == "CHASE" then
-		stopBlink()
+local function apply(mode)
+	if mode == "OFF" then -- no chase
+		picChase.Visible = false
+		picLost.Visible = false
+	elseif mode == "ON" then -- chase
 		picLost.Visible = false
 		picChase.Visible = true
-		picChase.ImageTransparency = 0
-	elseif mode == "LOST" then
+	elseif mode == "LOST" then -- lost target
 		picChase.Visible = false
-		startBlink()
-	elseif mode == "OFF" then
-		stopBlink()
-		picChase.Visible = false
-		picLost.Visible = false
+		picLost.Visible = true -- make sure this picture has a fade in fade out effect
+		if not fading then
+			fading = true
+			picLost.ImageTransparency = 1
+			local alpha = 1
+			-- fade in
+			while alpha > 0 do
+				alpha = alpha - 0.02
+				picLost.ImageTransparency = alpha
+				RunService.Heartbeat:Wait()
+			end
+			-- hold
+			task.wait(2)
+			-- fade out
+			while alpha < 1 do
+				alpha = alpha + 0.02
+				picLost.ImageTransparency = alpha
+				RunService.Heartbeat:Wait()
+			end
+			picLost.Visible = false
+			fading = false
+		end
 	end
-end)
+end
+
+BossUI.OnClientEvent:Connect(apply)
