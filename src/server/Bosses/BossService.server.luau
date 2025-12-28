@@ -43,6 +43,7 @@ local INTERACT_COOLDOWN = 1.5 -- seconds
 -- Click tracking
 local REQUIRED_CLICKS = 12
 local clickCount = {} :: {[Player]: number}
+local lastClickTime = {} :: {[Player]: number}
 
 local Workspace = game:GetService("Workspace")
 
@@ -99,7 +100,6 @@ root.Touched:Connect(function(hit)
 	end)
 end)
 
-
 local function hasLineOfSight(fromPos: Vector3, targetHRP: BasePart)
 	if not targetHRP then
 		return false
@@ -126,7 +126,6 @@ local function hasLineOfSight(fromPos: Vector3, targetHRP: BasePart)
 	-- If we directly hit the target character, LOS is valid
 	return result.Instance:IsDescendantOf(targetHRP.Parent)
 end
-
 
 local function pointInPolygonXZ(p, poly)
 	local inside = false
@@ -298,10 +297,24 @@ end)
 
 -- count noisy tool clicks
 NoisyToolClick.OnServerEvent:Connect(function(player)
+	local now = os.clock()
 	clickCount[player] = (clickCount[player] or 0) + 1
+	
+	-- reset count if too much time has passed since last click
+	if lastClickTime[player] then
+		if now - lastClickTime[player] > 0.8 then
+			clickCount[player] = 1
+			print("Player", player.Name, "click count reset due to timeout.")
+		end
+	end
+
+	lastClickTime[player] = now
+
 	print("Player", player.Name, "click count:", clickCount[player])
+
 	if clickCount[player] >= REQUIRED_CLICKS then
 		clickCount[player] = 0
+		lastClickTime[player] = nil
 		currentTarget = player
 		state = STATE_CHASE
 
