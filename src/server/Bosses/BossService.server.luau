@@ -1,6 +1,8 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local RunService = game:GetService("RunService")
+
 local Remotes = ReplicatedStorage:WaitForChild("remote")
 local BossUI = Remotes:WaitForChild("BossUI")
 local NoisyToolClick = Remotes:WaitForChild("NoisyToolClick")
@@ -17,12 +19,12 @@ pcall(function()
 	root:SetNetworkOwner(nil)
 end)
 
--- Library polygon (XZ)
-local POLY = {
-	Vector2.new(-39.05,  -74.314),
-	Vector2.new(-18.076, -152.59),
-	Vector2.new(-178.42, -195.554),
-	Vector2.new(-199.851,-115.576),
+-- Library RECT
+local RECT = {
+	minX = -222.07,
+	maxX = -2.376,
+	minZ = -210.505,
+	maxZ = -61.349,
 }
 
 local STATE_IDLE = "IDLE"
@@ -35,10 +37,6 @@ local wanderDestination : Vector3? = nil
 
 local LOST_DURATION = 4 -- seconds
 local lostStartTime = 0
-
-local INTERACT_DISTANCE = 4 -- studs (very close)
-local interactionCooldown = {} -- [Player] = lastTime
-local INTERACT_COOLDOWN = 1.5 -- seconds
 
 -- Click tracking
 local REQUIRED_CLICKS = 12
@@ -56,6 +54,9 @@ local Players = game:GetService("Players")
 local root = boss:WaitForChild("HumanoidRootPart")
 
 local touchDebounce = {}
+
+local AVOID_DISTANCE = 2
+local AVOID_ANGLE = 30 -- degrees left/right
 
 root.Touched:Connect(function(hit)
 	local character = hit.Parent
@@ -127,45 +128,24 @@ local function hasLineOfSight(fromPos: Vector3, targetHRP: BasePart)
 	return result.Instance:IsDescendantOf(targetHRP.Parent)
 end
 
-local function pointInPolygonXZ(p, poly)
-	local inside = false
-	local j = #poly
-	for i = 1, #poly do
-		local xi, zi = poly[i].X, poly[i].Y
-		local xj, zj = poly[j].X, poly[j].Y
-		local intersect =
-			((zi > p.Y) ~= (zj > p.Y)) and
-			(p.X < (xj - xi) * (p.Y - zi) / ((zj - zi) ~= 0 and (zj - zi) or 1e-9) + xi)
-		if intersect then inside = not inside end
-		j = i
-	end
-	return inside
+local function pointInRectXZ(pos)
+	return pos.X >= RECT.minX
+		and pos.X <= RECT.maxX
+		and pos.Z >= RECT.minZ
+		and pos.Z <= RECT.maxZ
 end
-
-local function bounds(poly)
-	local minX, maxX = math.huge, -math.huge
-	local minZ, maxZ = math.huge, -math.huge
-	for _, v in ipairs(poly) do
-		minX = math.min(minX, v.X)
-		maxX = math.max(maxX, v.X)
-		minZ = math.min(minZ, v.Y)
-		maxZ = math.max(maxZ, v.Y)
-	end
-	return minX, maxX, minZ, maxZ
-end
-
-local minX, maxX, minZ, maxZ = bounds(POLY)
 
 local function randomPointInLibrary()
 	for _ = 1, 80 do
-		local x = minX + math.random() * (maxX - minX)
-		local z = minZ + math.random() * (maxZ - minZ)
-		local p2 = Vector2.new(x, z)
-		if pointInPolygonXZ(p2, POLY) then
-			-- keep Y as whatever your floor is; we are NOT clamping yet
+		local x = RECT.minX + math.random() * (RECT.maxX - RECT.minX)
+		local z = RECT.minZ + math.random() * (RECT.maxZ - RECT.minZ)
+
+		if pointInRectXZ(Vector3.new(x, 0, z)) then
 			return Vector3.new(x, root.Position.Y, z)
 		end
 	end
+
+	-- fallback (should rarely happen)
 	return root.Position
 end
 
@@ -187,6 +167,7 @@ setAllOff()
 local WANDER_COOLDOWN = 0.5
 
 -- idle or chase or lost 
+-- idle or chase or lost 
 task.spawn(function()
 	while boss.Parent do
 		if state == STATE_IDLE then
@@ -196,101 +177,85 @@ task.spawn(function()
 			humanoid:MoveTo(dest)
 
 		elseif state == STATE_CHASE and currentTarget then
-			-- CHASE: move toward target
+			-- CHASE: move toward target (simple, alive, responsive)
 			local char = currentTarget.Character
 			local hrp = char and char:FindFirstChild("HumanoidRootPart")
 			local hum = char and char:FindFirstChildOfClass("Humanoid")
-		
+
+			-- invalid target → back to idle
 			if not hrp or not hum or hum.Health <= 0 then
-				-- target invalid → back to idle
-				-- default walking speed
-				humanoid.WalkSpeed = 10
 				state = STATE_IDLE
 				currentTarget = nil
+				humanoid.WalkSpeed = 10
 				setAllOff()
+
+			-- target left library → disengage
+			elseif not pointInRectXZ(hrp.Position) then
+				state = STATE_IDLE
+				currentTarget = nil
+				humanoid.WalkSpeed = 10
+				setAllOff()
+
+			-- lost LOS → LOST
+			elseif not hasLineOfSight(root.Position, hrp) then
+				state = STATE_LOST
+				wanderDestination = hrp.Position
+				lostStartTime = os.clock()
+				humanoid.WalkSpeed = 10
+				BossUI:FireClient(currentTarget, "LOST")
+
 			else
-				-- if target leaves library → immediate disengage
-				if not pointInPolygonXZ(
-					Vector2.new(hrp.Position.X, hrp.Position.Z),
-					POLY
-				) then
-					-- reset walking speed
-					humanoid.WalkSpeed = 10
-					-- lost them
-					state = STATE_IDLE
-					currentTarget = nil
-					setAllOff()
-				else
-					-- adjust the speed of the boss while chasing
-					if hrp and hasLineOfSight(root.Position, hrp) then
-						humanoid.WalkSpeed = 24
-						humanoid:MoveTo(hrp.Position)
-						
-					else
-						-- lost sight, go to LOST state
-						state = STATE_LOST
-						wanderDestination = hrp.Position
-						lostStartTime = os.clock()						
-						humanoid.WalkSpeed = 10
-						BossUI:FireClient(currentTarget, "LOST")
-					end
-				end
+				-- ACTIVE CHASE (this is the reintegrated part)
+				humanoid.WalkSpeed = 24
+				humanoid:MoveTo(hrp.Position)
 			end
-		elseif state == STATE_LOST then -- go to the last place the player was seen
+
+		elseif state == STATE_LOST then
 			local elapsed = os.clock() - lostStartTime
-			-- NO destination, go back to idle.
+
 			if not wanderDestination then
 				state = STATE_IDLE
 				humanoid.WalkSpeed = 10
 				setAllOff()
 
 			else
-				-- re-acquire the player
 				local hrp = nil
 				if currentTarget and currentTarget.Character then
 					hrp = currentTarget.Character:FindFirstChild("HumanoidRootPart")
 				end
 
-				-- switch back to CHASE.
+				-- re-acquire target
 				if hrp and hasLineOfSight(root.Position, hrp) then
 					state = STATE_CHASE
 					humanoid.WalkSpeed = 24
 					BossUI:FireClient(currentTarget, "ON")
 					humanoid:MoveTo(hrp.Position)
 
-				else
-					if elapsed < LOST_DURATION then
-						-- remain LOST and walk toward wanderDestination
-						humanoid.WalkSpeed = 10
+				elseif elapsed < LOST_DURATION then
+					humanoid.WalkSpeed = 10
+					if currentTarget then
+						BossUI:FireClient(currentTarget, "LOST")
+					end
+					humanoid:MoveTo(wanderDestination)
 
-						-- Optional: only tell the client LOST while we are lost
-						-- (This can be spammy if called every loop, but it's simple and safe.)
-						if currentTarget then
-							BossUI:FireClient(currentTarget, "LOST")
-						end
-
-						humanoid:MoveTo(wanderDestination)
-
-						-- reached last spot and did not find the player, IDLE
-						local dist = (root.Position - wanderDestination).Magnitude
-						if dist < 5 then
-							wanderDestination = nil
-							currentTarget = nil
-							state = STATE_IDLE
-							humanoid.WalkSpeed = 10
-							setAllOff()
-						end
-					else
-						-- give up, back to IDLE
+					local dist = (root.Position - wanderDestination).Magnitude
+					if dist < 5 then
 						wanderDestination = nil
 						currentTarget = nil
 						state = STATE_IDLE
 						humanoid.WalkSpeed = 10
 						setAllOff()
 					end
+				else
+					wanderDestination = nil
+					currentTarget = nil
+					state = STATE_IDLE
+					humanoid.WalkSpeed = 10
+					setAllOff()
 				end
 			end
 		end
+
 		task.wait(WANDER_COOLDOWN)
 	end
 end)

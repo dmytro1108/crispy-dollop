@@ -10,7 +10,11 @@ local SPAWN_POSITIONS = {
 	Library_rooftop_access = Vector3.new(-23, 41.5, 3),
 	Library_rooftop_exit = Vector3.new(-19, 73.5, -1),
 	Library_access = Vector3.new(-121.141, 0.499, -94.521),
-	Library_exit = Vector3.new(-121.876, 0.499, -91.956),
+	Library_exit = Vector3.new(-186.55, 66.979, 7.539),
+	exit = Vector3.new(-1230.806, 1.5, 53.669),
+	main_map = Vector3.new(-426, 66.95, -20.8),
+	-- from the spawn point -> main map: -426, 66.95, -20.8
+	-- 
 }
 
 ----------------------------------------------------
