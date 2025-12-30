@@ -21,10 +21,10 @@ end)
 
 -- Library RECT
 local RECT = {
-	minX = -222.07,
-	maxX = -2.376,
-	minZ = -210.505,
-	maxZ = -61.349,
+	minX = -140.5,
+	maxX = -25.8,
+	minZ = -35.1,
+	maxZ = 29,
 }
 
 local STATE_IDLE = "IDLE"
