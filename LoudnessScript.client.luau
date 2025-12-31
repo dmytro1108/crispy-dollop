@@ -51,12 +51,11 @@ local crouchHeld = false
 gui.Enabled = false
 
 local RECT = {
-	minX = -222.07,
-	maxX = -2.376,
-	minZ = -210.505,
-	maxZ = -61.349,
+	minX = -151.491,
+	maxX = -14.491,
+	minZ = -215.476,
+	maxZ = -78.476,
 }
-
 
 local COLORS = {
 	

@@ -288,4 +288,3 @@ NoisyToolClick.OnServerEvent:Connect(function(player)
 		BossUI:FireClient(player, "ON")
 	end
 end)
-
